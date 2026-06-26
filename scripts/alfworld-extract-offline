@@ -1,0 +1,151 @@
+#!/usr/bin/env python
+
+# Offline replacement for `alfworld-download`: instead of fetching the 6 ALFWorld
+# artifacts from GitHub releases, read them from a local directory pointed to by
+# the ALFWORLD_OFFLINE_DATA environment variable (a flat directory holding the 6
+# raw download files), then extract/copy them into --data-dir (default $ALFWORLD_DATA)
+# using the exact same layout `alfworld-download` would produce, so downstream
+# configs (configs/*.yaml reference $ALFWORLD_DATA/...) work unchanged.
+
+import os
+import shutil
+import zipfile
+import argparse
+from os.path import join as pjoin
+
+from tqdm import tqdm
+
+from alfworld.utils import mkdirs
+from alfworld.info import ALFWORLD_DATA
+from alfworld.info import ALFRED_PDDL_PATH, ALFRED_TWL2_PATH
+
+
+# The 6 raw download artifacts (filenames as produced by alfworld-download's URLs).
+JSON_ZIP = "json_2.1.1_json.zip"
+PDDL_ZIP = "json_2.1.1_pddl.zip"
+TW_PDDL_ZIP = "json_2.1.3_tw-pddl.zip"
+MRCNN_PTH = "mrcnn_alfred_objects_sep13_004.pth"
+CHECKPOINTS_ZIP = "pretrained_checkpoints.zip"
+SEQ2SEQ_ZIP = "seq2seq_data.zip"
+
+
+def locate(offline_dir, filename):
+    """Find `filename` directly inside the flat offline dir.
+
+    The offline source is a flat directory of the 6 artifacts by contract, so a
+    plain listing is sufficient.
+    """
+    matches = [f for f in os.listdir(offline_dir) if f == filename]
+    if not matches:
+        raise FileNotFoundError(
+            f"'{filename}' not found in ALFWORLD_OFFLINE_DATA={offline_dir}. "
+            f"Make sure the 6 raw download artifacts are present in that directory."
+        )
+    if len(matches) > 1:
+        print(f"WARNING: '{filename}' found multiple times in {offline_dir}; using the first.")
+    return pjoin(offline_dir, matches[0])
+
+
+def unzip(filename, dst, force=False):
+    """Extract a zip into dst, skipping files that already exist unless force.
+
+    Inlined verbatim from scripts/alfworld-download (lines 86-99) so this script is
+    self-contained (scripts/ is not an importable package).
+    """
+    zipped_file = zipfile.ZipFile(filename)
+    filenames_to_extract = list(zipped_file.namelist())
+
+    desc = f"Extracting {os.path.basename(filename)}"
+    skipped = 0
+    for f in tqdm(filenames_to_extract, desc=desc):
+        if not os.path.isfile(pjoin(dst, f)) or force:
+            zipped_file.extract(f, dst)
+        else:
+            skipped += 1
+
+    if skipped:
+        print(f"{skipped} files skipped (use -f to overwrite).")
+
+
+def copy_file(src, dst, force=False):
+    """Copy src to dst, skipping if dst exists unless force (mirrors alfworld-download:152-161)."""
+    if os.path.isfile(dst) and not force:
+        print(f"{dst} already exists (use -f to overwrite).")
+    else:
+        shutil.copyfile(src, dst)
+
+
+def build_argparser():
+    parser = argparse.ArgumentParser(
+        description="Extract ALFWorld data from a local offline source "
+                    "(ALFWORLD_OFFLINE_DATA) into --data-dir. Offline replacement for alfworld-download."
+    )
+    parser.add_argument("--data-dir", default=ALFWORLD_DATA,
+                        help="Folder where to extract the data. Default: '%(default)s'")
+    parser.add_argument("--extra", action="store_true",
+                        help="Also extract pre-trained BUTLER checkpoints and Seq2Seq data.")
+    parser.add_argument("-f", "--force", action="store_true",
+                        help="Overwrite existing files.")
+    return parser
+
+
+def main():
+    parser = build_argparser()
+    args = parser.parse_args()
+
+    offline_dir = os.environ.get("ALFWORLD_OFFLINE_DATA")
+    if not offline_dir:
+        parser.exit(
+            status=1,
+            message=(
+                "ERROR: ALFWORLD_OFFLINE_DATA is not set. Point it at a directory "
+                "containing the 6 raw download artifacts: "
+                f"{JSON_ZIP}, {PDDL_ZIP}, {TW_PDDL_ZIP}, {MRCNN_PTH}"
+                f"{', ' + CHECKPOINTS_ZIP + ', ' + SEQ2SEQ_ZIP if args.extra else ''}.\n"
+            ),
+        )
+    if not os.path.isdir(offline_dir):
+        parser.exit(
+            status=1,
+            message=f"ERROR: ALFWORLD_OFFLINE_DATA={offline_dir} is not a directory.\n",
+        )
+
+    data_dir = mkdirs(args.data_dir)
+    print(f"Offline source: {offline_dir}")
+    print(f"Data dir:       {data_dir}")
+
+    # --- json / pddl / tw-pddl zips -> all extract into data_dir/json_2.1.1/ ---
+    # (they share the tree; per-trial filenames are non-conflicting)
+    zipped = locate(offline_dir, JSON_ZIP)
+    unzip(zipped, dst=data_dir, force=args.force)
+
+    zipped = locate(offline_dir, PDDL_ZIP)
+    unzip(zipped, dst=data_dir, force=args.force)
+
+    zipped = locate(offline_dir, TW_PDDL_ZIP)
+    unzip(zipped, dst=data_dir, force=args.force)
+
+    # --- mrcnn model -> data_dir/detectors/ (single file, no rename) ---
+    detectors_dir = mkdirs(pjoin(data_dir, "detectors"))
+    copy_file(locate(offline_dir, MRCNN_PTH),
+              pjoin(detectors_dir, MRCNN_PTH),
+              force=args.force)
+
+    if args.extra:
+        # checkpoints zip -> data_dir/agents/ (extracts to agents/pretrained_checkpoints/)
+        zipped = locate(offline_dir, CHECKPOINTS_ZIP)
+        agents_dir = mkdirs(pjoin(data_dir, "agents"))
+        unzip(zipped, dst=agents_dir, force=args.force)
+
+        # seq2seq zip -> data_dir (extracts to data_dir/seq2seq_data/)
+        zipped = locate(offline_dir, SEQ2SEQ_ZIP)
+        unzip(zipped, dst=data_dir, force=args.force)
+
+    # --- builtin logic files -> data_dir/logic/ (copied from the alfworld package) ---
+    logic_dir = mkdirs(pjoin(data_dir, "logic"))
+    copy_file(ALFRED_PDDL_PATH, pjoin(logic_dir, "alfred.pddl"), force=args.force)
+    copy_file(ALFRED_TWL2_PATH, pjoin(logic_dir, "alfred.twl2"), force=args.force)
+
+
+if __name__ == "__main__":
+    main()

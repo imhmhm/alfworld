@@ -15,6 +15,7 @@ setup(
     packages=find_packages(),
     scripts=[
         "scripts/alfworld-download",
+        "scripts/alfworld-extract-offline",
         "scripts/alfworld-generate",
         "scripts/alfworld-play-tw",
         "scripts/alfworld-play-thor",
@@ -23,7 +24,7 @@ setup(
     license=open('LICENSE').read(),
     zip_safe=False,
     description="ALFWorld - Aligning Text and Embodied Environments for Interactive Learning.",
-    install_requires=open('requirements.txt').readlines(),
+    install_requires=open('requirements_webstudio.txt').readlines(),
     extras_require={
         'full': open('requirements-full.txt').readlines(),
         'vis': open('requirements-vis.txt').readlines(),
